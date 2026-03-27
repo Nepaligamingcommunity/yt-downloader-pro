@@ -1,5 +1,5 @@
 /**
- * YT Downloader Pro — Node.js Backend (v2.0.0)
+ * YT Downloader Pro — Node.js Backend (v1.0)
  *
  * npm install express ws
  * Requires: yt-dlp and ffmpeg in PATH
@@ -151,9 +151,8 @@ const OUTPUT_TEMPLATE = "%(title)s.%(ext)s";
 
 function buildCommonArgs(settings) {
   const args = [
-    // Force web+ios player clients — the android client is affected by YouTube's
-    // PoToken integrity checks and strips video streams when cookies are present.
-    "--extractor-args",   "youtube:player_client=web,ios",
+    // Node.js IS a supported JS runtime but must be declared explicitly in newer yt-dlp.
+    // This suppresses the "No supported JavaScript runtime" warning/error.
     "--js-runtimes",      "node",
     "--user-agent",       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "--no-check-certificates",
@@ -179,9 +178,9 @@ function buildCommonArgs(settings) {
 
 const QUALITY_MAP = {
   best:   "bestvideo+bestaudio/best",
-  "4k":   "bestvideo[height<=2160]+bestaudio/bestvideo[height<=2160]+bestaudio[ext=m4a]/best",
-  "1080p":"bestvideo[height<=1080]+bestaudio/bestvideo[height<=1080]+bestaudio[ext=m4a]/best",
-  "720p": "bestvideo[height<=720]+bestaudio/bestvideo[height<=720]+bestaudio[ext=m4a]/best",
+  "4k":   "bestvideo[height<=2160][ext=mp4]+bestaudio/best",
+  "1080p":"bestvideo[height<=1080][ext=mp4]+bestaudio/best",
+  "720p": "bestvideo[height<=720][ext=mp4]+bestaudio/best",
   "480p": "bestvideo[height<=480]+bestaudio/best",
   "360p": "bestvideo[height<=360]+bestaudio/best",
 };
@@ -316,21 +315,14 @@ function wireDownload(id, emitter, ws, meta) {
     wsSend(ws, "download:complete", id, d);
     try {
       const history = loadHistory();
-      // Derive the filename yt-dlp would have written (matches OUTPUT_TEMPLATE +
-      // --restrict-filenames behaviour) so the Player can do a direct lookup.
-      const safeTitle = (meta.title || "")
-        .replace(/[^\w\s.\-]/g, "")   // strip characters removed by --restrict-filenames
-        .replace(/\s+/g, "_")
-        .substring(0, 200);
       history.unshift({
         id,
-        title:    meta.title || meta.url,
-        url:      meta.url,
-        mode:     meta.mode,
-        format:   meta.format || "?",
-        dir:      meta.outputDir,
-        filename: safeTitle,           // approximate — used for fuzzy matching in Player
-        date:     new Date().toISOString(),
+        title:  meta.title || meta.url,
+        url:    meta.url,
+        mode:   meta.mode,
+        format: meta.format || "?",
+        dir:    meta.outputDir,
+        date:   new Date().toISOString(),
       });
       if (history.length > 200) history.splice(200);
       saveHistory(history);
@@ -349,91 +341,6 @@ app.use(express.json({ limit: "64kb" }));
 app.use(express.static(path.join(__dirname)));
 app.get("/", (_req, res) => res.sendFile(path.join(__dirname, "index.html")));
 
-// ── Media constants ───────────────────────────────────────────────────────────
-const VIDEO_EXTS = new Set([".mp4", ".webm", ".mkv", ".mov", ".avi"]);
-const AUDIO_EXTS = new Set([".mp3", ".m4a", ".opus", ".flac", ".wav"]);
-const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
-const ALL_MEDIA_EXTS = new Set([...VIDEO_EXTS, ...AUDIO_EXTS, ...IMAGE_EXTS]);
-
-const MIME_MAP = {
-  ".mp4":"video/mp4",       ".webm":"video/webm",       ".mkv":"video/x-matroska",
-  ".mov":"video/quicktime", ".avi":"video/x-msvideo",
-  ".mp3":"audio/mpeg",      ".m4a":"audio/mp4",          ".opus":"audio/ogg",
-  ".flac":"audio/flac",     ".wav":"audio/wav",
-  ".jpg":"image/jpeg",      ".jpeg":"image/jpeg",
-  ".png":"image/png",       ".webp":"image/webp",
-};
-
-// ── /media — range-aware file streaming ──────────────────────────────────────
-// Reads settings.defaultDir on every request — no restart needed after changes.
-app.use("/media", (req, res) => {
-  const dir = loadSettings().defaultDir;
-  // Strip leading slashes, normalise, block traversal
-  const rel  = decodeURIComponent(req.path).replace(/^[/\\]+/, "");
-  const safe = path.normalize(rel).replace(/^(\.\.(\/|\\|$))+/, "");
-  const abs  = path.join(dir, safe);
-  const ext  = path.extname(abs).toLowerCase();
-
-  if (!ALL_MEDIA_EXTS.has(ext))   return res.status(403).json({ error: "Forbidden" });
-  if (!abs.startsWith(path.resolve(dir) + path.sep) &&
-      abs !== path.resolve(dir))   return res.status(403).json({ error: "Access denied" });
-  if (!fs.existsSync(abs))         return res.status(404).json({ error: "Not found" });
-
-  const stat  = fs.statSync(abs);
-  const total = stat.size;
-  const mime  = MIME_MAP[ext] || "application/octet-stream";
-  const range = req.headers.range;
-
-  // Range requests are required for video scrubbing in the browser
-  if (range) {
-    const [s, e]   = range.replace(/bytes=/, "").split("-");
-    const start    = parseInt(s, 10);
-    const end      = e ? parseInt(e, 10) : Math.min(start + 2 * 1024 * 1024, total - 1);
-    if (start >= total) return res.status(416).set("Content-Range", `bytes */${total}`).end();
-    res.writeHead(206, {
-      "Content-Range":  `bytes ${start}-${end}/${total}`,
-      "Accept-Ranges":  "bytes",
-      "Content-Length": end - start + 1,
-      "Content-Type":   mime,
-    });
-    fs.createReadStream(abs, { start, end }).pipe(res);
-  } else {
-    res.writeHead(200, {
-      "Content-Length": total,
-      "Content-Type":   mime,
-      "Accept-Ranges":  "bytes",
-    });
-    fs.createReadStream(abs).pipe(res);
-  }
-});
-
-// ── GET /api/files — list playable files in the current download folder ───────
-app.get("/api/files", (_req, res) => {
-  const dir = loadSettings().defaultDir;
-  try {
-    if (!fs.existsSync(dir)) return res.json({ files: [], dir });
-    const files = fs.readdirSync(dir, { withFileTypes: true })
-      .filter(e => e.isFile() && ALL_MEDIA_EXTS.has(path.extname(e.name).toLowerCase()))
-      .map(e => {
-        const abs  = path.join(dir, e.name);
-        const st   = fs.statSync(abs);
-        const ext  = path.extname(e.name).toLowerCase();
-        return {
-          name:  e.name,
-          url:   "/media/" + encodeURIComponent(e.name),
-          size:  st.size,
-          mtime: st.mtimeMs,
-          type:  VIDEO_EXTS.has(ext) ? "video" : AUDIO_EXTS.has(ext) ? "audio" : "image",
-        };
-      })
-      .sort((a, b) => b.mtime - a.mtime);   // newest first
-    res.json({ files, dir });
-  } catch (err) {
-    log("error", "/api/files failed", { err: err.message });
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // GET /api/info?url=
 app.get("/api/info", (req, res) => {
   const { url } = req.query;
@@ -443,7 +350,7 @@ app.get("/api/info", (req, res) => {
       "--skip-download",
       "--print", "%(title)s|%(duration)s|%(uploader)s|%(view_count)s|%(upload_date)s|%(like_count)s|%(thumbnail)s",
       "--no-check-certificates",
-      "--extractor-args", "youtube:player_client=web,ios",
+      "--extractor-args", "youtube:player_client=android",
       url,
     ], { timeout: 20000, encoding: "utf8" }).trim();
 
@@ -468,7 +375,6 @@ app.get("/api/formats", (req, res) => {
     const raw = execFileSync("yt-dlp", [
       "-J",
       "--no-check-certificates",
-      "--extractor-args", "youtube:player_client=web,ios",
       url,
     ], { timeout: 25000, encoding: "utf8" });
     const data    = JSON.parse(raw);
@@ -692,8 +598,8 @@ process.on("SIGINT",  () => gracefulShutdown("SIGINT"));
 
     // 3. Start listening
     server.listen(PORT, () => {
-      log("info", `YT Downloader Pro v2.0.0 started on http://localhost:${PORT}`);
-      console.log(`\n  ✔  YT Downloader Pro v2.0.0  →  http://localhost:${PORT}`);
+      log("info", `YT Downloader Pro v1.0 started on http://localhost:${PORT}`);
+      console.log(`\n  ✔  YT Downloader Pro v1.0  →  http://localhost:${PORT}`);
       console.log(`  📁  Data directory: ${DATA_DIR}\n`);
     });
   } catch (err) {
