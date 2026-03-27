@@ -1,4 +1,4 @@
-# YT Downloader Pro (v1.0)
+# YT Downloader Pro 
 
 > A self-hosted YouTube downloader with a browser-based UI, real-time progress tracking, batch queueing, and structured logging — powered by Node.js and yt-dlp.
 
