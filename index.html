@@ -636,8 +636,291 @@ select option{background:var(--bg2);}
 .pulse-red{animation:pulseRed 1.5s ease-in-out infinite;}
 @keyframes pulseRed{0%,100%{box-shadow:0 0 0 0 var(--red-glow)}50%{box-shadow:0 0 0 6px transparent}}
 
-/* ── Divider ─────────────────────────────────────────── */
-.divider{height:1px;background:var(--border);margin:16px 0;}
+/* ── Player tab layout ───────────────────────────────── */
+/* The player tab overrides .main padding so it can be full-bleed */
+#tab-player{
+  display:none;
+  margin:-28px -32px;           /* undo .main padding */
+  height:calc(100vh - 56px);
+  overflow:hidden;
+}
+#tab-player.active{display:flex;}
+
+.player-shell{
+  display:grid;
+  grid-template-columns:1fr 280px;
+  width:100%;
+  height:100%;
+  overflow:hidden;
+}
+
+/* ── Player stage (left column) ──────────────────────── */
+.player-stage{
+  display:flex;flex-direction:column;
+  overflow:hidden;
+  background:#000;
+  position:relative;
+}
+
+/* Video element */
+.player-video-el{
+  width:100%;
+  flex:1;
+  object-fit:contain;
+  display:block;
+  background:#000;
+  outline:none;
+  /* hide native controls — we draw our own */
+}
+
+/* Audio art backdrop (shown for audio tracks) */
+.player-audio-backdrop{
+  flex:1;
+  display:none;
+  flex-direction:column;
+  align-items:center;justify-content:center;
+  gap:20px;
+  background:radial-gradient(ellipse at center, var(--bg3) 0%, #000 100%);
+  padding:32px;
+}
+.player-audio-backdrop.visible{display:flex;}
+.player-art{
+  width:140px;height:140px;
+  background:var(--bg2);
+  border:1px solid var(--border2);
+  border-radius:var(--r-lg);
+  display:flex;align-items:center;justify-content:center;
+  font-size:3rem;
+  box-shadow:0 16px 48px rgba(0,0,0,.5);
+}
+.player-audio-title{
+  font-family:var(--serif);
+  font-size:1.1rem;
+  color:var(--text);
+  text-align:center;
+  max-width:340px;
+  line-height:1.4;
+}
+.player-audio-el{
+  width:100%;max-width:340px;
+  outline:none;
+  border-radius:8px;
+}
+
+/* Empty / placeholder state */
+.player-empty{
+  flex:1;
+  display:flex;flex-direction:column;
+  align-items:center;justify-content:center;
+  gap:12px;
+  color:var(--text3);
+  font-size:.85rem;
+  background:radial-gradient(ellipse at center, var(--bg2) 0%, #000 100%);
+}
+.player-empty-icon{font-size:3rem;opacity:.15;}
+.player-empty-hint{font-size:.75rem;color:var(--text3);opacity:.6;}
+
+/* ── Custom controls bar ─────────────────────────────── */
+.player-controls{
+  flex-shrink:0;
+  background:var(--bg1);
+  border-top:1px solid var(--border);
+  padding:10px 16px 12px;
+  display:flex;flex-direction:column;gap:8px;
+}
+
+/* seek bar */
+.seek-row{display:flex;align-items:center;gap:10px;}
+.seek-time{
+  font-family:var(--mono);font-size:.68rem;color:var(--text3);
+  white-space:nowrap;min-width:36px;
+}
+.seek-wrap{
+  flex:1;
+  height:20px;
+  display:flex;align-items:center;
+  cursor:pointer;
+  position:relative;
+}
+.seek-track{
+  width:100%;height:3px;
+  background:var(--bg3);
+  border-radius:2px;
+  position:relative;
+  overflow:visible;
+}
+.seek-buf{
+  height:100%;background:var(--border2);
+  border-radius:2px;position:absolute;left:0;top:0;
+}
+.seek-fill{
+  height:100%;
+  background:linear-gradient(90deg,var(--red),var(--amber));
+  border-radius:2px;position:absolute;left:0;top:0;
+  transition:width .1s linear;
+}
+.seek-thumb{
+  width:12px;height:12px;
+  background:var(--red);
+  border-radius:50%;
+  border:2px solid #fff;
+  position:absolute;
+  top:50%;transform:translate(-50%,-50%);
+  box-shadow:0 0 6px var(--red-glow);
+  pointer-events:none;
+  opacity:0;
+  transition:opacity var(--trans);
+}
+.seek-wrap:hover .seek-thumb{opacity:1;}
+
+/* buttons row */
+.ctrl-row{display:flex;align-items:center;gap:4px;}
+.ctrl-btn{
+  width:32px;height:32px;
+  background:none;border:none;
+  color:var(--text2);cursor:pointer;
+  border-radius:8px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:.9rem;
+  transition:all var(--trans);
+}
+.ctrl-btn:hover{background:var(--bg3);color:var(--text);}
+.ctrl-btn.active{color:var(--red);}
+.ctrl-play{
+  width:38px;height:38px;
+  background:var(--red);
+  color:#fff;font-size:1rem;
+  border-radius:50%;
+  box-shadow:0 0 12px var(--red-glow);
+}
+.ctrl-play:hover{background:#d93535;transform:scale(1.05);}
+.ctrl-spacer{flex:1;}
+.vol-wrap{display:flex;align-items:center;gap:6px;}
+.vol-slider{
+  -webkit-appearance:none;appearance:none;
+  width:70px;height:3px;
+  background:var(--bg3);
+  border-radius:2px;outline:none;cursor:pointer;
+}
+.vol-slider::-webkit-slider-thumb{
+  -webkit-appearance:none;
+  width:12px;height:12px;border-radius:50%;
+  background:var(--text2);cursor:pointer;
+}
+.vol-slider:hover::-webkit-slider-thumb{background:var(--red);}
+.speed-select{
+  font-size:.68rem;font-family:var(--mono);
+  background:var(--bg3);border:1px solid var(--border);
+  color:var(--text2);border-radius:6px;
+  padding:3px 6px;cursor:pointer;outline:none;
+  appearance:none;
+}
+
+/* Now-playing title strip */
+.player-now-title{
+  font-size:.75rem;font-weight:500;color:var(--text2);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  flex:1;
+  padding:0 8px;
+}
+
+/* ── Now Playing sidebar (right column) ─────────────── */
+.np-sidebar{
+  background:var(--bg1);
+  border-left:1px solid var(--border);
+  display:flex;flex-direction:column;
+  overflow:hidden;
+}
+.np-header{
+  padding:14px 14px 10px;
+  border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;
+  flex-shrink:0;
+}
+.np-title{
+  font-size:.65rem;font-family:var(--mono);letter-spacing:.1em;
+  text-transform:uppercase;color:var(--text3);
+}
+.np-refresh{
+  background:none;border:none;color:var(--text3);cursor:pointer;
+  font-size:.8rem;padding:2px 6px;border-radius:5px;
+  transition:all var(--trans);
+}
+.np-refresh:hover{background:var(--bg3);color:var(--text);}
+.np-list{
+  flex:1;overflow-y:auto;
+  padding:8px;
+  display:flex;flex-direction:column;gap:2px;
+}
+.np-item{
+  display:flex;align-items:center;gap:8px;
+  padding:8px 10px;
+  border-radius:8px;
+  cursor:pointer;
+  border:1px solid transparent;
+  transition:all var(--trans);
+}
+.np-item:hover{background:var(--bg3);border-color:var(--border);}
+.np-item.active{
+  background:var(--red-dim);
+  border-color:rgba(240,64,64,.25);
+}
+.np-icon{
+  font-size:.85rem;flex-shrink:0;
+  width:22px;text-align:center;
+  color:var(--text3);
+}
+.np-item.active .np-icon{color:var(--red);}
+.np-name{
+  flex:1;min-width:0;
+  font-size:.74rem;
+  color:var(--text2);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  line-height:1.3;
+}
+.np-item.active .np-name{color:var(--text);font-weight:500;}
+.np-meta{
+  font-size:.62rem;font-family:var(--mono);
+  color:var(--text3);flex-shrink:0;
+}
+.np-empty{
+  padding:32px 16px;text-align:center;
+  color:var(--text3);font-size:.78rem;
+  display:flex;flex-direction:column;gap:8px;
+  align-items:center;
+}
+.np-empty-icon{font-size:1.5rem;opacity:.2;}
+
+/* ── Play button used in History tab ─────────────────── */
+.btn-play-hist{
+  background:var(--red-dim);
+  color:var(--red);
+  border-color:rgba(240,64,64,.25);
+}
+.btn-play-hist:hover{
+  background:rgba(240,64,64,.2);
+  box-shadow:0 0 12px var(--red-glow);
+}
+
+/* ── MKV / unsupported notice ────────────────────────── */
+.player-unsupported{
+  flex:1;
+  display:flex;flex-direction:column;
+  align-items:center;justify-content:center;
+  gap:14px;
+  background:radial-gradient(ellipse at center, var(--bg2) 0%, #000 100%);
+  padding:32px;
+  text-align:center;
+}
+.player-unsupported-icon{font-size:2.5rem;opacity:.25;}
+.player-unsupported-msg{font-size:.82rem;color:var(--text2);max-width:340px;line-height:1.6;}
+
+/* ── Responsive: stack for narrow screens ────────────── */
+@media(max-width:820px){
+  .player-shell{grid-template-columns:1fr;}
+  .np-sidebar{display:none;}
+  #tab-player{margin:-28px -16px;}
+}
 </style>
 </head>
 <body>
@@ -675,6 +958,9 @@ select option{background:var(--bg2);}
     <div class="nav-section">Library</div>
     <div class="nav-btn" data-tab="history">
       <span class="nav-icon">◷</span> History
+    </div>
+    <div class="nav-btn" data-tab="player">
+      <span class="nav-icon">▶</span> Player
     </div>
 
     <div class="nav-section">Config</div>
@@ -924,6 +1210,115 @@ select option{background:var(--bg2);}
       <div id="historyList"></div>
     </div>
 
+    <!-- ════ Player tab ══════════════════════════════ -->
+    <div class="tab-panel" id="tab-player">
+      <div class="player-shell">
+
+        <!-- ── Stage: video / audio element + controls ── -->
+        <div class="player-stage" id="playerStage">
+
+          <!-- video element (hidden until a video is loaded) -->
+          <video class="player-video-el" id="playerVideo" preload="metadata"
+                 ontimeupdate="onTimeUpdate()" onloadedmetadata="onMetaLoaded()"
+                 onended="onEnded()" onwaiting="onWaiting()" onplaying="onPlaying()"
+                 onprogress="onProgress()" style="display:none"></video>
+
+          <!-- audio art screen (shown for audio tracks) -->
+          <div class="player-audio-backdrop" id="playerAudioBd">
+            <div class="player-art" id="playerArt">🎵</div>
+            <div class="player-audio-title" id="playerAudioTitle">—</div>
+            <audio id="playerAudio" preload="metadata"
+                   ontimeupdate="onTimeUpdate()" onloadedmetadata="onMetaLoaded()"
+                   onended="onEnded()" onwaiting="onWaiting()" onplaying="onPlaying()"
+                   onprogress="onProgress()"></audio>
+          </div>
+
+          <!-- unsupported format notice -->
+          <div class="player-unsupported" id="playerUnsupported" style="display:none">
+            <div class="player-unsupported-icon">🎬</div>
+            <div class="player-unsupported-msg" id="playerUnsupportedMsg"></div>
+          </div>
+
+          <!-- empty / welcome state -->
+          <div class="player-empty" id="playerEmpty">
+            <div class="player-empty-icon">▶</div>
+            <div>Select a file from the list →</div>
+            <div class="player-empty-hint">or click ▶ on any History entry</div>
+          </div>
+
+          <!-- ── Custom controls ─────────────────────── -->
+          <div class="player-controls" id="playerControls" style="display:none">
+
+            <!-- seek bar -->
+            <div class="seek-row">
+              <span class="seek-time" id="seekCurrent">0:00</span>
+              <div class="seek-wrap" id="seekWrap"
+                   onmousedown="seekStart(event)" ontouchstart="seekStart(event)">
+                <div class="seek-track">
+                  <div class="seek-buf"  id="seekBuf"  style="width:0%"></div>
+                  <div class="seek-fill" id="seekFill" style="width:0%"></div>
+                  <div class="seek-thumb" id="seekThumb" style="left:0%"></div>
+                </div>
+              </div>
+              <span class="seek-time" id="seekTotal">0:00</span>
+            </div>
+
+            <!-- buttons -->
+            <div class="ctrl-row">
+              <button class="ctrl-btn" title="Previous" onclick="playAdjacent(-1)">⏮</button>
+              <button class="ctrl-btn" title="Back 5s"  onclick="skip(-10)">⏪</button>
+              <button class="ctrl-btn ctrl-play" id="ctrlPlay" onclick="togglePlay()">▶</button>
+              <button class="ctrl-btn" title="Fwd 5s"   onclick="skip(10)">⏩</button>
+              <button class="ctrl-btn" title="Next"      onclick="playAdjacent(1)">⏭</button>
+              <div class="ctrl-spacer"></div>
+
+              <!-- now-playing title -->
+              <div class="player-now-title" id="playerNowTitle">—</div>
+
+              <div class="ctrl-spacer"></div>
+
+              <!-- volume -->
+              <div class="vol-wrap">
+                <button class="ctrl-btn" id="muteBtn" onclick="toggleMute()" title="Mute">🔊</button>
+                <input type="range" class="vol-slider" id="volSlider"
+                       min="0" max="1" step="0.02" value="1"
+                       oninput="setVolume(this.value)"/>
+              </div>
+
+              <!-- playback speed -->
+              <select class="speed-select" id="speedSelect" onchange="setSpeed(this.value)">
+                <option value="0.5">0.5×</option>
+                <option value="0.75">0.75×</option>
+                <option value="1" selected>1×</option>
+                <option value="1.25">1.25×</option>
+                <option value="1.5">1.5×</option>
+                <option value="2">2×</option>
+              </select>
+
+              <!-- fullscreen (video only) -->
+              <button class="ctrl-btn" id="fsBtn" onclick="toggleFullscreen()" title="Fullscreen" style="display:none">⛶</button>
+            </div>
+          </div>
+        </div><!-- /player-stage -->
+
+        <!-- ── Now Playing sidebar ─────────────────────── -->
+        <aside class="np-sidebar">
+          <div class="np-header">
+            <span class="np-title">Now Playing</span>
+            <button class="np-refresh" onclick="loadPlayerFiles()" title="Refresh">↺</button>
+          </div>
+          <div class="np-list" id="npList">
+            <div class="np-empty">
+              <div class="np-empty-icon">♪</div>
+              <div>No files found</div>
+              <div style="font-size:.7rem;color:var(--text3)">Download something first</div>
+            </div>
+          </div>
+        </aside>
+
+      </div><!-- /player-shell -->
+    </div><!-- /tab-player -->
+
     <!-- ════ Settings tab ════════════════════════════ -->
     <div class="tab-panel" id="tab-settings">
       <div class="page-head">
@@ -1156,6 +1551,7 @@ document.querySelectorAll(".nav-btn[data-tab]").forEach(btn => {
     btn.classList.add("active");
     document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
     if (btn.dataset.tab === "history") loadHistory();
+    if (btn.dataset.tab === "player")  loadPlayerFiles();
   });
 });
 
@@ -1419,7 +1815,15 @@ function renderHistory() {
     return;
   }
 
-  list.innerHTML = items.map(item => `
+  list.innerHTML = items.map(item => {
+    const canPlay = item.mode === "video" || item.mode === "audio";
+    const playBtn = canPlay
+  ? `<button class="btn btn-sm btn-play-hist"
+       data-hist-title="${escHtml(item.title || "")}"
+       data-hist-file="${escHtml(item.filename || "")}"
+       title="Play in Player tab">▶</button>`
+  : "";
+    return `
     <div class="history-item">
       <div class="history-body">
         <div class="history-title">${escHtml(item.title || item.url)}</div>
@@ -1430,12 +1834,20 @@ function renderHistory() {
         </div>
       </div>
       <div class="history-actions">
+        ${playBtn}
         <button class="btn btn-ghost btn-sm" onclick="redownload('${escHtml(item.url)}')">↺</button>
         <button class="btn btn-ghost btn-sm" title="Delete" onclick="deleteHistoryItem(${item.id})">✕</button>
       </div>
-    </div>
-  `).join("");
+    </div>`;
+  }).join("");
 }
+
+// Delegated click handler for dynamically rendered history ▶ buttons
+document.getElementById("historyList").addEventListener("click", e => {
+  const btn = e.target.closest("[data-hist-title]");
+  if (!btn) return;
+  playFromHistory(btn.dataset.histTitle, btn.dataset.histFile);
+});
 
 async function clearHistory() {
   if (!confirm("Clear all download history?")) return;
@@ -1556,6 +1968,406 @@ function escHtml(s) {
     .replace(/</g,"&lt;")
     .replace(/>/g,"&gt;")
     .replace(/"/g,"&quot;");
+}
+
+// ══════════════════════════════════════════════════════
+// ── Media Player ──────────────────────────────────────
+// ══════════════════════════════════════════════════════
+
+// State
+let playerFiles   = [];   // [{name,url,size,mtime,type}] from /api/files
+let playerIdx     = -1;   // index of currently loaded file
+let playerEl      = null; // active HTMLMediaElement (video or audio)
+let isSeeking     = false;
+let lastVolume    = 1;    // cached volume level so mute/unmute doesn't reset to 100%
+
+// Format seconds → m:ss or h:mm:ss
+function fmtTime(sec) {
+  if (!isFinite(sec) || sec < 0) return "0:00";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  return h > 0
+    ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`
+    : `${m}:${String(s).padStart(2,"0")}`;
+}
+
+function fmtBytes(b) {
+  if (b < 1024)       return b + " B";
+  if (b < 1048576)    return (b/1024).toFixed(1) + " KB";
+  if (b < 1073741824) return (b/1048576).toFixed(1) + " MB";
+  return (b/1073741824).toFixed(2) + " GB";
+}
+
+// Browser-supported MIME types
+const BROWSER_VIDEO = { ".mp4":"video/mp4", ".webm":"video/webm", ".mov":"video/quicktime" };
+const BROWSER_AUDIO = {
+  ".mp3":"audio/mpeg", ".m4a":"audio/mp4", ".opus":"audio/ogg",
+  ".flac":"audio/flac", ".wav":"audio/wav",
+};
+
+// ── Load file list from /api/files and render sidebar ──
+async function loadPlayerFiles() {
+  try {
+    const res  = await fetch("/api/files");
+    const data = await res.json();
+    playerFiles = data.files || [];
+    renderNpList();
+  } catch {
+    playerFiles = [];
+    renderNpList();
+  }
+}
+
+function renderNpList() {
+  const list = document.getElementById("npList");
+  if (!playerFiles.length) {
+    list.innerHTML = `
+      <div class="np-empty">
+        <div class="np-empty-icon">♪</div>
+        <div>No media files found</div>
+        <div style="font-size:.7rem;color:var(--text3)">Download something first</div>
+      </div>`;
+    return;
+  }
+  list.innerHTML = playerFiles.map((f, i) => {
+    const icon = f.type === "video" ? "🎬" : f.type === "audio" ? "🎵" : "🖼";
+    const active = i === playerIdx;
+    return `
+    <div class="np-item ${active ? "active" : ""}" onclick="loadTrack(${i})">
+      <span class="np-icon">${active ? "▶" : icon}</span>
+      <span class="np-name" title="${escHtml(f.name)}">${escHtml(f.name)}</span>
+      <span class="np-meta">${fmtBytes(f.size)}</span>
+    </div>`;
+  }).join("");
+}
+
+// ── Load and play a track by index ────────────────────
+function loadTrack(idx) {
+  if (idx < 0 || idx >= playerFiles.length) return;
+  playerIdx = idx;
+  const file = playerFiles[idx];
+  const ext  = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
+
+  // Stop previous media cleanly
+  stopMedia();
+
+  // Update sidebar highlight
+  renderNpList();
+  // Scroll active item into view
+  const npList = document.getElementById("npList");
+  const activeEl = npList.querySelector(".np-item.active");
+  if (activeEl) activeEl.scrollIntoView({ block: "nearest" });
+
+  // Show title in controls
+  document.getElementById("playerNowTitle").textContent = file.name;
+
+  // Reset seek
+  setScrubber(0, 0, 0);
+  document.getElementById("seekTotal").textContent = "0:00";
+  document.getElementById("seekCurrent").textContent = "0:00";
+
+  // Hide all states
+  document.getElementById("playerEmpty").style.display       = "none";
+  document.getElementById("playerUnsupported").style.display = "none";
+  document.getElementById("playerAudioBd").classList.remove("visible");
+  document.getElementById("playerVideo").style.display       = "none";
+  document.getElementById("playerControls").style.display    = "none";
+  document.getElementById("fsBtn").style.display             = "none";
+
+  if (BROWSER_VIDEO[ext]) {
+    // ── Video ─────────────────────────────────────────
+    const vid = document.getElementById("playerVideo");
+    vid.src = file.url;
+    vid.style.display = "block";
+    document.getElementById("playerControls").style.display = "flex";
+    document.getElementById("fsBtn").style.display = "";
+    playerEl = vid;
+    vid.play().catch(() => {});
+
+  } else if (BROWSER_AUDIO[ext]) {
+    // ── Audio ─────────────────────────────────────────
+    const aud = document.getElementById("playerAudio");
+    aud.src = file.url;
+    const bd = document.getElementById("playerAudioBd");
+    bd.classList.add("visible");
+    document.getElementById("playerAudioTitle").textContent = file.name;
+    document.getElementById("playerControls").style.display = "flex";
+    playerEl = aud;
+    aud.play().catch(() => {});
+
+  } else {
+    // ── Unsupported (e.g. MKV) ────────────────────────
+    const msg = ext === ".mkv"
+      ? `.mkv files cannot be decoded by browsers natively.<br>
+         Re-download as <strong>MP4</strong> or open with VLC.<br><br>
+         <a href="${file.url}" download="${escHtml(file.name)}"
+            style="color:var(--blue)">⬇ Save to disk</a>`
+      : `<strong>${ext}</strong> is not supported for in-browser playback.`;
+    document.getElementById("playerUnsupportedMsg").innerHTML = msg;
+    document.getElementById("playerUnsupported").style.display = "flex";
+  }
+}
+
+function stopMedia() {
+  ["playerVideo","playerAudio"].forEach(id => {
+    const el = document.getElementById(id);
+    el.pause();
+    el.removeAttribute("src");
+    el.load();
+  });
+  playerEl = null;
+  document.getElementById("ctrlPlay").textContent = "▶";
+}
+
+// ── Media element event handlers ───────────────────────
+function onMetaLoaded() {
+  if (!playerEl) return;
+  document.getElementById("seekTotal").textContent = fmtTime(playerEl.duration);
+  updatePlayBtn();
+}
+
+function onTimeUpdate() {
+  if (!playerEl || isSeeking) return;
+  const pct = playerEl.duration ? (playerEl.currentTime / playerEl.duration) * 100 : 0;
+  setScrubber(pct, pct, (playerEl.buffered.length
+    ? (playerEl.buffered.end(playerEl.buffered.length-1) / playerEl.duration) * 100
+    : 0));
+  document.getElementById("seekCurrent").textContent = fmtTime(playerEl.currentTime);
+}
+
+function onProgress() {
+  if (!playerEl || !playerEl.duration) return;
+  const b = playerEl.buffered;
+  if (b.length) {
+    const pct = (b.end(b.length - 1) / playerEl.duration) * 100;
+    document.getElementById("seekBuf").style.width = pct + "%";
+  }
+}
+
+function onEnded() {
+  updatePlayBtn();
+  playAdjacent(1);
+}
+function onWaiting()  { document.getElementById("ctrlPlay").textContent = "⟳"; }
+function onPlaying()  { updatePlayBtn(); }
+
+function updatePlayBtn() {
+  const playing = playerEl && !playerEl.paused;
+  document.getElementById("ctrlPlay").textContent = playing ? "⏸" : "▶";
+}
+
+function setScrubber(fillPct, thumbPct, bufPct) {
+  document.getElementById("seekFill").style.width  = fillPct  + "%";
+  document.getElementById("seekThumb").style.left  = thumbPct + "%";
+  document.getElementById("seekBuf").style.width   = bufPct   + "%";
+}
+
+// ── Playback controls ──────────────────────────────────
+function togglePlay() {
+  if (!playerEl) return;
+  playerEl.paused ? playerEl.play() : playerEl.pause();
+  updatePlayBtn();
+}
+
+function skip(sec) {
+  if (!playerEl) return;
+  playerEl.currentTime = Math.max(0, Math.min(playerEl.duration || 0, playerEl.currentTime + sec));
+}
+
+function playAdjacent(delta) {
+  const next = playerIdx + delta;
+  if (next >= 0 && next < playerFiles.length) loadTrack(next);
+}
+
+function setVolume(v) {
+  if (!playerEl) return;
+  
+  // Convert string input from slider to float
+  const vol = parseFloat(v);
+  playerEl.volume = vol;
+  
+  // Cache non-zero volume so unmute can restore it
+  if (vol > 0) lastVolume = vol;
+
+  // If user manually slides to 0, treat it as muted
+  playerEl.muted = (vol === 0);
+  
+  // Update the UI
+  const volSlider = document.getElementById("volSlider");
+  if (volSlider) volSlider.value = vol;
+  
+  const muteBtn = document.getElementById("muteBtn");
+  if (muteBtn) {
+    muteBtn.textContent = (playerEl.muted || vol === 0) ? "🔇" : "🔊";
+  }
+}
+
+function toggleMute() {
+  if (!playerEl) return;
+
+  playerEl.muted = !playerEl.muted;
+  
+  const volSlider = document.getElementById("volSlider");
+  const muteBtn   = document.getElementById("muteBtn");
+
+  if (playerEl.muted) {
+    // Visually zero the slider without changing the actual volume level
+    if (volSlider) volSlider.value = 0;
+    if (muteBtn)   muteBtn.textContent = "🔇";
+  } else {
+    // Restore slider to the cached last non-zero volume
+    const restoreVol = lastVolume > 0 ? lastVolume : 1;
+    playerEl.volume = restoreVol;
+    if (volSlider) volSlider.value = restoreVol;
+    if (muteBtn)   muteBtn.textContent = "🔊";
+  }
+}
+
+function setSpeed(v) {
+  if (playerEl) playerEl.playbackRate = parseFloat(v);
+}
+
+function toggleFullscreen() {
+  const vid = document.getElementById("playerVideo");
+  if (!vid) return;
+  if (document.fullscreenElement) {
+    document.exitFullscreen();
+  } else {
+    vid.requestFullscreen().catch(() => {});
+  }
+}
+
+// ── Seek bar drag (mouse + touch) ──────────────────────
+function seekStart(e) {
+  if (!playerEl || !playerEl.duration) return;
+  isSeeking = true;
+  seekMove(e);
+  const onMove = ev => seekMove(ev);
+  const onUp   = ()  => {
+    isSeeking = false;
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup",   onUp);
+    document.removeEventListener("touchmove", onMove);
+    document.removeEventListener("touchend",  onUp);
+  };
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup",   onUp);
+  document.addEventListener("touchmove", onMove, { passive: true });
+  document.addEventListener("touchend",  onUp);
+}
+
+function seekMove(e) {
+  if (!playerEl || !playerEl.duration) return;
+  const wrap = document.getElementById("seekWrap");
+  const rect = wrap.getBoundingClientRect();
+  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+  const ratio   = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  playerEl.currentTime = ratio * playerEl.duration;
+  setScrubber(ratio * 100, ratio * 100,
+    playerEl.buffered.length
+      ? (playerEl.buffered.end(playerEl.buffered.length-1) / playerEl.duration) * 100
+      : 0);
+  document.getElementById("seekCurrent").textContent = fmtTime(playerEl.currentTime);
+}
+
+// Space = play/pause when player tab is active
+document.addEventListener("keydown", e => {
+  const playerActive = document.getElementById("tab-player").classList.contains("active");
+  // Only trigger if player tab is active and not typing in an input
+  if (!playerActive || !playerEl) return;
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA") return;
+
+  // M = Mute
+  if (e.key.toLowerCase() === "m") {
+    e.preventDefault();
+    toggleMute();
+  }
+
+  // F = Fullscreen
+  if (e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    toggleFullscreen();
+  }
+
+  // F4 or Pause/Break = Play/Pause (Space handled as backup)
+  if (e.key === "F4" || e.key === "Pause" || e.code === "Space") {
+    e.preventDefault();
+    togglePlay();
+  }
+
+  // Left/Right Arrows (No Ctrl) = 5 Second Seek
+  if (e.code === "ArrowRight" && !e.ctrlKey) {
+    e.preventDefault();
+    playerEl.currentTime = Math.min(playerEl.duration, playerEl.currentTime + 5);
+  }
+  if (e.code === "ArrowLeft" && !e.ctrlKey) {
+    e.preventDefault();
+    playerEl.currentTime = Math.max(0, playerEl.currentTime - 5);
+  }
+
+  // Ctrl + Right = Play Media Below (Next)
+  if (e.ctrlKey && e.code === "ArrowRight") {
+    e.preventDefault();
+    playNextPrev(1);
+  }
+
+  // Ctrl + Left = Play Media Above (Previous)
+  if (e.ctrlKey && e.code === "ArrowLeft") {
+    e.preventDefault();
+    playNextPrev(-1);
+  }
+
+  // Keep Up/Down for Volume
+  if (e.code === "ArrowUp") {
+    e.preventDefault();
+    const newVol = Math.min(1, (playerEl.volume || 0) + .05);
+    setVolume(newVol);
+  }
+  if (e.code === "ArrowDown") {
+    e.preventDefault();
+    const newVol = Math.max(0, (playerEl.volume || 0) - .05);
+    setVolume(newVol);
+  }
+});
+
+function playNextPrev(direction) {
+  if (!playerFiles || playerFiles.length === 0) return;
+  
+  let nextIndex = playerIdx + direction;
+
+  // Loop around if out of bounds
+  if (nextIndex >= playerFiles.length) nextIndex = 0;
+  if (nextIndex < 0) nextIndex = playerFiles.length - 1;
+
+  loadTrack(nextIndex);
+  showToast(`Playing: ${playerFiles[nextIndex].name}`, "info");
+}
+
+// ── History → Player integration ───────────────────────
+// Called by the ▶ button in the History tab.
+// Fetches /api/files, fuzzy-matches the file by title, then navigates to Player.
+async function playFromHistory(title, filename) {
+  // Switch to Player tab first so user sees something happening
+  document.querySelector('.nav-btn[data-tab="player"]').click();
+
+  if (!playerFiles.length) await loadPlayerFiles();
+
+  if (!playerFiles.length) {
+    showToast("No media files found in download folder", "error");
+    return;
+  }
+
+  // Score: count how many title words appear in each filename
+  const words = (title || "").toLowerCase().replace(/[^\w\s]/g," ").split(/\s+/).filter(Boolean);
+  const scored = playerFiles.map((f, i) => {
+    const n    = f.name.toLowerCase();
+    const hits = words.filter(w => n.includes(w)).length;
+    return { i, hits };
+  });
+  scored.sort((a, b) => b.hits - a.hits || playerFiles[a.i].mtime - playerFiles[b.i].mtime);
+
+  loadTrack(scored[0].i);
 }
 
 // ── Init ───────────────────────────────────────────────
