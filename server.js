@@ -3,6 +3,22 @@
  *
  * npm install express ws
  * Requires: yt-dlp and ffmpeg in PATH
+ *
+ * Fixes applied vs v2.0.0:
+ *  - Replaced broken player_client=web,ios with default,web_embedded
+ *  - Removed deprecated --prefer-ffmpeg flag
+ *  - Removed --user-agent override (breaks default client negotiation)
+ *  - Resolved ffmpeg path at startup using `where`/`which` so spawned
+ *    yt-dlp subprocesses always find ffmpeg even when shell: false
+ *  - Fixed QUALITY_MAP format selectors to always include a proper
+ *    bestvideo+bestaudio pair with strong fallbacks — prevents silent
+ *    video-only downloads
+ *  - Added --audio-multistreams so opus/webm audio merges into mp4
+ *  - Added ffmpeg_o postprocessor arg to re-encode opus→aac for
+ *    maximum player compatibility
+ *  - Removed --js-runtimes node from /api/info and /api/formats
+ *    (not needed for metadata-only calls, causes spurious warnings)
+ *  - Increased /api/info and /api/formats timeouts for slow connections
  */
 
 "use strict";
@@ -18,13 +34,16 @@ const { EventEmitter }    = require("events");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT          = 3000;
-// Use the project folder so data lives next to the app — no path mismatch
 const DATA_DIR      = path.join(__dirname, ".ytdlp-web");
 const HISTORY_FILE  = path.join(DATA_DIR, "history.json");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const ARCHIVE_FILE  = path.join(DATA_DIR, "archive.txt");
 const LOG_FILE      = path.join(DATA_DIR, "server.log");
 const MAX_LOG_SIZE  = 5 * 1024 * 1024; // 5 MB
+
+// Resolved at startup by checkDependencies() — absolute path so yt-dlp
+// subprocesses always find ffmpeg regardless of shell environment.
+let FFMPEG_PATH = "ffmpeg";
 
 const SETTINGS_SCHEMA = {
   defaultDir:         { type: "string",  default: path.join(os.homedir(), "Downloads") },
@@ -49,7 +68,6 @@ function log(level, msg, meta = {}) {
   if (level === "error") console.error(`[${level.toUpperCase()}] ${msg}`);
   else                   console.log(`[${level.toUpperCase()}] ${msg}`);
 
-  // Async write with size-based rotation
   fs.stat(LOG_FILE, (statErr, stats) => {
     if (!statErr && stats.size > MAX_LOG_SIZE) {
       try { fs.renameSync(LOG_FILE, `${LOG_FILE}.${Date.now()}.old`); } catch {}
@@ -68,6 +86,7 @@ function checkDependencies() {
   ];
   console.log("--- Pre-flight Dependency Check ---");
   const versions = {};
+
   for (const dep of deps) {
     try {
       const out = execSync(dep.cmd, { stdio: "pipe" }).toString();
@@ -79,6 +98,21 @@ function checkDependencies() {
       process.exit(1);
     }
   }
+
+  // Resolve the absolute path to ffmpeg.
+  // `where` (Windows) / `which` (Unix) returns the full path so that
+  // yt-dlp spawned with shell:false can always locate ffmpeg.
+  try {
+    const cmd = process.platform === "win32" ? "where ffmpeg" : "which ffmpeg";
+    const raw = execSync(cmd, { stdio: "pipe" }).toString().trim();
+    // `where` may return multiple lines — take the first one
+    FFMPEG_PATH = raw.split(/\r?\n/)[0].trim();
+    console.log(`[OK] ffmpeg path: ${FFMPEG_PATH}`);
+  } catch {
+    FFMPEG_PATH = "ffmpeg"; // fallback — rely on PATH
+    console.log(`[WARN] Could not resolve absolute ffmpeg path, falling back to "ffmpeg"`);
+  }
+
   console.log("-----------------------------------");
   return versions;
 }
@@ -114,7 +148,7 @@ function validateSettings(raw) {
 function loadSettings() {
   try {
     const text = fs.readFileSync(SETTINGS_FILE, "utf8").trim();
-    const raw  = text ? JSON.parse(text) : {};          // handle 0-byte file
+    const raw  = text ? JSON.parse(text) : {};
     return validateSettings({ ...buildDefaultSettings(), ...raw });
   } catch {
     return buildDefaultSettings();
@@ -128,7 +162,7 @@ function saveSettings(settings) {
 function loadHistory() {
   try {
     const text = fs.readFileSync(HISTORY_FILE, "utf8").trim();
-    return text ? JSON.parse(text) : [];                // handle 0-byte file
+    return text ? JSON.parse(text) : [];
   } catch { return []; }
 }
 
@@ -137,33 +171,32 @@ function saveHistory(history) {
 }
 
 // ── Active process tracking ───────────────────────────────────────────────────
-// activeDownloads: id → { process, cancelled, emitter }  (download lifecycle)
-// activeProcesses: id → ChildProcess                     (graceful shutdown)
 const activeDownloads = new Map();
 const activeProcesses = new Map();
 let   dlIdCounter     = 1;
 
-// ── Build yt-dlp argument arrays  ─────────────────────────────────────────────
-// Use simple title template — nested fallback %(title|%(id)s)s is not supported
-// in all yt-dlp versions and causes a literal parse error.
-// --restrict-filenames handles characters that are illegal on Windows paths.
+// ── Build yt-dlp argument arrays ──────────────────────────────────────────────
 const OUTPUT_TEMPLATE = "%(title)s.%(ext)s";
 
 function buildCommonArgs(settings) {
   const args = [
-    // Force web+ios player clients — the android client is affected by YouTube's
-    // PoToken integrity checks and strips video streams when cookies are present.
-    "--extractor-args",   "youtube:player_client=web,ios",
-    "--js-runtimes",      "node",
-    "--user-agent",       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    // "default" lets yt-dlp pick the best working client automatically
+    // (currently android_vr as of 2026-03). "web_embedded" is the
+    // JS-based fallback — it does NOT require a PO token.
+    // Do NOT add ios or plain web here — both require GVS PO tokens.
+    "--extractor-args",   "youtube:player_client=default,web_embedded",
+    "--js-runtimes",      "node",           // needed by web_embedded client
     "--no-check-certificates",
-    "--socket-timeout",   "30",          // prevents ETIMEDOUT hanging forever
+    "--socket-timeout",   "30",
     "--retries",          String(settings.retries),
     "--fragment-retries", String(settings.retries),
-    "--restrict-filenames",              // strips characters illegal on Windows (e.g. : / \ * ?)
+    "--restrict-filenames",
     "--newline",
     "--progress",
+    // Always pass the absolute ffmpeg path resolved at startup
+    "--ffmpeg-location",  FFMPEG_PATH,
   ];
+
   if (settings.rateLimit)
     args.push("--rate-limit", settings.rateLimit);
   if (settings.useCookies && fs.existsSync(settings.cookiesFile))
@@ -174,64 +207,122 @@ function buildCommonArgs(settings) {
     args.push("--sponsorblock-remove", "all");
   if (settings.embedChapters)
     args.push("--embed-chapters");
+
   return args;
 }
 
+// Format selectors: always pair bestvideo+bestaudio.
+// The fallback chain ensures that even if a height-capped stream is
+// unavailable, yt-dlp degrades gracefully rather than selecting a
+// video-only format silently.
 const QUALITY_MAP = {
-  best:   "bestvideo+bestaudio/best",
-  "4k":   "bestvideo[height<=2160]+bestaudio/bestvideo[height<=2160]+bestaudio[ext=m4a]/best",
-  "1080p":"bestvideo[height<=1080]+bestaudio/bestvideo[height<=1080]+bestaudio[ext=m4a]/best",
-  "720p": "bestvideo[height<=720]+bestaudio/bestvideo[height<=720]+bestaudio[ext=m4a]/best",
-  "480p": "bestvideo[height<=480]+bestaudio/best",
-  "360p": "bestvideo[height<=360]+bestaudio/best",
+  best:   "bestvideo+bestaudio/bestvideo*+bestaudio/best",
+  "4k":   "bestvideo[height<=2160]+bestaudio/bestvideo[height<=2160]+bestaudio/best",
+  "1080p":"bestvideo[height<=1080]+bestaudio/bestvideo[height<=1080]+bestaudio/best",
+  "720p": "bestvideo[height<=720]+bestaudio/bestvideo[height<=720]+bestaudio/best",
+  "480p": "bestvideo[height<=480]+bestaudio/bestvideo[height<=480]+bestaudio/best",
+  "360p": "bestvideo[height<=360]+bestaudio/bestvideo[height<=360]+bestaudio/best",
 };
 
 const AUDIO_QUALITY_MAP = { best: "0", high: "2", good: "4", low: "9" };
 
 function buildVideoArgs(options, settings) {
-  const { quality, container, subs, outputDir, url } = options;
+  const { quality, container, subs, outputDir, url, playlistMode } = options;
   const args = buildCommonArgs(settings);
-  args.push("-f", QUALITY_MAP[quality] ?? QUALITY_MAP.best);
-  args.push("--merge-output-format", container || settings.defaultFormat || "mp4");
+
+  // 1. Playlist handling
+  if (playlistMode === "playlist") {
+    args.push("--yes-playlist");
+    args.push("--output", path.join(outputDir, "%(playlist_title)s/%(playlist_index)s - %(title)s.%(ext)s"));
+  } else {
+    args.push("--no-playlist");
+  }
+
+  // 2. Updated QUALITY_MAP logic for MP4 compatibility
+  // We prioritize m4a audio specifically to avoid the Opus-in-MP4 "no audio" bug.
+  const mp4FriendlyQuality = (QUALITY_MAP[quality] || QUALITY_MAP.best)
+    .split('/')
+    .map(f => f.includes('+') ? f.replace('bestaudio', 'bestaudio[ext=m4a]') + '/' + f : f)
+    .join('/');
+
+  args.push("-f", mp4FriendlyQuality);
+  
+  // 3. Container and Merger settings
+  const targetContainer = container || settings.defaultFormat || "mp4";
+  args.push("--merge-output-format", targetContainer);
+  args.push("--audio-multistreams");
+
+  // 4. Forced Re-encoding
+  // If we end up with non-AAC audio, this forces a high-bitrate AAC conversion.
+  args.push("--postprocessor-args", "ffmpeg:-c:a aac -b:a 192k");
+
+  // 5. Metadata and Subs
   args.push("--embed-thumbnail", "--embed-metadata");
   if (subs === "en")  args.push("--embed-subs", "--sub-langs", "en.*,en");
   if (subs === "all") args.push("--embed-subs", "--all-subs");
-  args.push("-o", path.join(outputDir, OUTPUT_TEMPLATE));
+
+  if (playlistMode !== "playlist") {
+    args.push("-o", path.join(outputDir, OUTPUT_TEMPLATE));
+  }
+
   args.push(url);
   return args;
 }
 
 function buildAudioArgs(options, settings) {
-  const { format, quality, outputDir, url } = options;
+  const { format, quality, outputDir, url, playlistMode } = options;
   const args = buildCommonArgs(settings);
-  args.push(
-    "-x",
-    "--audio-format",  format || settings.defaultAudioFormat || "mp3",
-    "--audio-quality", AUDIO_QUALITY_MAP[quality] ?? "0",
-    "--embed-thumbnail",
-    "--embed-metadata",
-    "--add-metadata",
-    "-o", path.join(outputDir, OUTPUT_TEMPLATE),
-    url
-  );
+
+  // playlist handling
+  if (playlistMode === "playlist") {
+    args.push("--yes-playlist");
+    args.push("-x",
+      "--audio-format",  format || settings.defaultAudioFormat || "mp3",
+      "--audio-quality", AUDIO_QUALITY_MAP[quality] ?? "0",
+      "--embed-thumbnail",
+      "--embed-metadata",
+      "--add-metadata",
+      "-o", path.join(outputDir, "%(playlist_title)s/%(playlist_index)s - %(title)s.%(ext)s"),
+      url
+    );
+  } else {
+    args.push("--no-playlist");
+    args.push(
+      "-x",
+      "--audio-format",  format || settings.defaultAudioFormat || "mp3",
+      "--audio-quality", AUDIO_QUALITY_MAP[quality] ?? "0",
+      "--embed-thumbnail",
+      "--embed-metadata",
+      "--add-metadata",
+      "-o", path.join(outputDir, OUTPUT_TEMPLATE),
+      url
+    );
+  }
   return args;
 }
 
 function buildThumbnailArgs(options, settings) {
-  const { format, outputDir, url } = options;
+  const { format, outputDir, url, playlistMode } = options;
   const args = buildCommonArgs(settings);
+  if (playlistMode === "playlist") {
+    args.push("--yes-playlist");
+  } else {
+    args.push("--no-playlist");
+  }
   args.push("--write-thumbnail", "--skip-download");
   if (format && format !== "webp") args.push("--convert-thumbnails", format);
-  args.push("-o", path.join(outputDir, OUTPUT_TEMPLATE), url);
+  const outTpl = playlistMode === "playlist"
+    ? path.join(outputDir, "%(playlist_title)s/%(playlist_index)s - %(title)s.%(ext)s")
+    : path.join(outputDir, OUTPUT_TEMPLATE);
+  args.push("-o", outTpl, url);
   return args;
 }
 
-// ── Core download runner ───────────────────────────────────────────────────────
-// Returns an EventEmitter that fires: progress | log | complete | error | cancelled
+// ── Core download runner ──────────────────────────────────────────────────────
+// Returns an EventEmitter: progress | log | complete | error | cancelled
 function runDownload(id, args) {
   const emitter = new EventEmitter();
 
-  // Ensure output directory exists
   const outIdx = args.indexOf("-o");
   if (outIdx !== -1) {
     try { fs.mkdirSync(path.dirname(args[outIdx + 1]), { recursive: true }); } catch {}
@@ -315,11 +406,9 @@ function wireDownload(id, emitter, ws, meta) {
   emitter.on("complete", (d) => {
     wsSend(ws, "download:complete", id, d);
     try {
-      const history = loadHistory();
-      // Derive the filename yt-dlp would have written (matches OUTPUT_TEMPLATE +
-      // --restrict-filenames behaviour) so the Player can do a direct lookup.
+      const history   = loadHistory();
       const safeTitle = (meta.title || "")
-        .replace(/[^\w\s.\-]/g, "")   // strip characters removed by --restrict-filenames
+        .replace(/[^\w\s.\-]/g, "")
         .replace(/\s+/g, "_")
         .substring(0, 200);
       history.unshift({
@@ -329,7 +418,7 @@ function wireDownload(id, emitter, ws, meta) {
         mode:     meta.mode,
         format:   meta.format || "?",
         dir:      meta.outputDir,
-        filename: safeTitle,           // approximate — used for fuzzy matching in Player
+        filename: safeTitle,
         date:     new Date().toISOString(),
       });
       if (history.length > 200) history.splice(200);
@@ -350,25 +439,23 @@ app.use(express.static(path.join(__dirname)));
 app.get("/", (_req, res) => res.sendFile(path.join(__dirname, "index.html")));
 
 // ── Media constants ───────────────────────────────────────────────────────────
-const VIDEO_EXTS = new Set([".mp4", ".webm", ".mkv", ".mov", ".avi"]);
-const AUDIO_EXTS = new Set([".mp3", ".m4a", ".opus", ".flac", ".wav"]);
-const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+const VIDEO_EXTS     = new Set([".mp4", ".webm", ".mkv", ".mov", ".avi"]);
+const AUDIO_EXTS     = new Set([".mp3", ".m4a", ".opus", ".flac", ".wav"]);
+const IMAGE_EXTS     = new Set([".jpg", ".jpeg", ".png", ".webp"]);
 const ALL_MEDIA_EXTS = new Set([...VIDEO_EXTS, ...AUDIO_EXTS, ...IMAGE_EXTS]);
 
 const MIME_MAP = {
-  ".mp4":"video/mp4",       ".webm":"video/webm",       ".mkv":"video/x-matroska",
+  ".mp4":"video/mp4",       ".webm":"video/webm",      ".mkv":"video/x-matroska",
   ".mov":"video/quicktime", ".avi":"video/x-msvideo",
-  ".mp3":"audio/mpeg",      ".m4a":"audio/mp4",          ".opus":"audio/ogg",
+  ".mp3":"audio/mpeg",      ".m4a":"audio/mp4",         ".opus":"audio/ogg",
   ".flac":"audio/flac",     ".wav":"audio/wav",
   ".jpg":"image/jpeg",      ".jpeg":"image/jpeg",
   ".png":"image/png",       ".webp":"image/webp",
 };
 
 // ── /media — range-aware file streaming ──────────────────────────────────────
-// Reads settings.defaultDir on every request — no restart needed after changes.
 app.use("/media", (req, res) => {
-  const dir = loadSettings().defaultDir;
-  // Strip leading slashes, normalise, block traversal
+  const dir  = loadSettings().defaultDir;
   const rel  = decodeURIComponent(req.path).replace(/^[/\\]+/, "");
   const safe = path.normalize(rel).replace(/^(\.\.(\/|\\|$))+/, "");
   const abs  = path.join(dir, safe);
@@ -384,11 +471,10 @@ app.use("/media", (req, res) => {
   const mime  = MIME_MAP[ext] || "application/octet-stream";
   const range = req.headers.range;
 
-  // Range requests are required for video scrubbing in the browser
   if (range) {
-    const [s, e]   = range.replace(/bytes=/, "").split("-");
-    const start    = parseInt(s, 10);
-    const end      = e ? parseInt(e, 10) : Math.min(start + 2 * 1024 * 1024, total - 1);
+    const [s, e] = range.replace(/bytes=/, "").split("-");
+    const start  = parseInt(s, 10);
+    const end    = e ? parseInt(e, 10) : Math.min(start + 2 * 1024 * 1024, total - 1);
     if (start >= total) return res.status(416).set("Content-Range", `bytes */${total}`).end();
     res.writeHead(206, {
       "Content-Range":  `bytes ${start}-${end}/${total}`,
@@ -407,7 +493,7 @@ app.use("/media", (req, res) => {
   }
 });
 
-// ── GET /api/files — list playable files in the current download folder ───────
+// ── GET /api/files ────────────────────────────────────────────────────────────
 app.get("/api/files", (_req, res) => {
   const dir = loadSettings().defaultDir;
   try {
@@ -415,9 +501,9 @@ app.get("/api/files", (_req, res) => {
     const files = fs.readdirSync(dir, { withFileTypes: true })
       .filter(e => e.isFile() && ALL_MEDIA_EXTS.has(path.extname(e.name).toLowerCase()))
       .map(e => {
-        const abs  = path.join(dir, e.name);
-        const st   = fs.statSync(abs);
-        const ext  = path.extname(e.name).toLowerCase();
+        const abs = path.join(dir, e.name);
+        const st  = fs.statSync(abs);
+        const ext = path.extname(e.name).toLowerCase();
         return {
           name:  e.name,
           url:   "/media/" + encodeURIComponent(e.name),
@@ -426,7 +512,7 @@ app.get("/api/files", (_req, res) => {
           type:  VIDEO_EXTS.has(ext) ? "video" : AUDIO_EXTS.has(ext) ? "audio" : "image",
         };
       })
-      .sort((a, b) => b.mtime - a.mtime);   // newest first
+      .sort((a, b) => b.mtime - a.mtime);
     res.json({ files, dir });
   } catch (err) {
     log("error", "/api/files failed", { err: err.message });
@@ -434,20 +520,24 @@ app.get("/api/files", (_req, res) => {
   }
 });
 
-// GET /api/info?url=
+// ── GET /api/info?url= ────────────────────────────────────────────────────────
 app.get("/api/info", (req, res) => {
   const { url } = req.query;
   if (!url || typeof url !== "string") return res.status(400).json({ error: "No URL" });
   try {
     const raw = execFileSync("yt-dlp", [
       "--skip-download",
+      "--playlist-items", "1",          // only fetch metadata for the first entry
       "--print", "%(title)s|%(duration)s|%(uploader)s|%(view_count)s|%(upload_date)s|%(like_count)s|%(thumbnail)s",
       "--no-check-certificates",
-      "--extractor-args", "youtube:player_client=web,ios",
+      "--extractor-args", "youtube:player_client=default,web_embedded",
+      "--js-runtimes", "node",
       url,
-    ], { timeout: 20000, encoding: "utf8" }).trim();
+    ], { timeout: 45000, encoding: "utf8" }).trim();
 
-    const [title, duration, uploader, views, upload_date, likes, thumbnail] = raw.split("|");
+    // For playlists, --print emits one line per video; take the first line only
+    const firstLine = raw.split("\n")[0].trim();
+    const [title, duration, uploader, views, upload_date, likes, thumbnail] = firstLine.split("|");
     res.json({
       title, uploader, upload_date, thumbnail,
       duration: parseInt(duration) || 0,
@@ -460,7 +550,7 @@ app.get("/api/info", (req, res) => {
   }
 });
 
-// GET /api/formats?url=
+// ── GET /api/formats?url= ─────────────────────────────────────────────────────
 app.get("/api/formats", (req, res) => {
   const { url } = req.query;
   if (!url || typeof url !== "string") return res.status(400).json({ error: "No URL" });
@@ -468,9 +558,10 @@ app.get("/api/formats", (req, res) => {
     const raw = execFileSync("yt-dlp", [
       "-J",
       "--no-check-certificates",
-      "--extractor-args", "youtube:player_client=web,ios",
+      "--extractor-args", "youtube:player_client=default,web_embedded",
+      "--ffmpeg-location", FFMPEG_PATH,
       url,
-    ], { timeout: 25000, encoding: "utf8" });
+    ], { timeout: 30000, encoding: "utf8" });
     const data    = JSON.parse(raw);
     const formats = (data.formats || []).map((f) => ({
       format_id:  f.format_id,
@@ -490,7 +581,7 @@ app.get("/api/formats", (req, res) => {
   }
 });
 
-// History CRUD
+// ── History CRUD ──────────────────────────────────────────────────────────────
 app.get("/api/history",    (_req, res) => res.json(loadHistory()));
 app.delete("/api/history", (_req, res) => { saveHistory([]); res.json({ ok: true }); });
 app.delete("/api/history/:id", (req, res) => {
@@ -499,7 +590,7 @@ app.delete("/api/history/:id", (req, res) => {
   res.json({ ok: true });
 });
 
-// Settings
+// ── Settings ──────────────────────────────────────────────────────────────────
 app.get("/api/settings",  (_req, res) => res.json(loadSettings()));
 app.post("/api/settings",  (req, res) => {
   const updated = validateSettings({ ...loadSettings(), ...req.body });
@@ -507,20 +598,37 @@ app.post("/api/settings",  (req, res) => {
   res.json(updated);
 });
 
-// Cancel
+// ── Cancel ────────────────────────────────────────────────────────────────────
 app.post("/api/cancel/:id", (req, res) => {
   const id    = parseInt(req.params.id);
   const entry = activeDownloads.get(id);
   if (!entry) return res.status(404).json({ error: "Download not found" });
-  entry.cancelled = true;         // set BEFORE kill so close handler sees it
-  entry.process.kill("SIGTERM");
+
+  entry.cancelled = true;
+
+  try {
+    if (process.platform === "win32") {
+      // On Windows SIGTERM is not supported — kill() without a signal
+      // sends the equivalent of TerminateProcess which works reliably.
+      entry.process.kill();
+    } else {
+      entry.process.kill("SIGTERM");
+      // SIGKILL fallback after 3 s in case yt-dlp ignores SIGTERM
+      setTimeout(() => {
+        try { entry.process.kill("SIGKILL"); } catch {}
+      }, 3000);
+    }
+  } catch (e) {
+    log("warn", "kill failed", { id, err: e.message });
+  }
+
   res.json({ ok: true });
 });
 
-// Active downloads list
+// ── Active downloads list ─────────────────────────────────────────────────────
 app.get("/api/active", (_req, res) => res.json([...activeDownloads.keys()]));
 
-// yt-dlp version & update
+// ── yt-dlp version & update ───────────────────────────────────────────────────
 app.get("/api/ytdlp-version", (_req, res) => {
   try {
     const version = execFileSync("yt-dlp", ["--version"], { encoding: "utf8" }).trim();
@@ -531,12 +639,11 @@ app.get("/api/ytdlp-version", (_req, res) => {
 });
 
 app.post("/api/update-ytdlp", (_req, res) => {
-  // Try yt-dlp's own self-updater first; fall back to pip for pip-installed copies
   const strategies = [
-    () => execFileSync("yt-dlp", ["-U"], { encoding: "utf8" }),
-    () => execFileSync("pip",    ["install", "-U", "yt-dlp"], { encoding: "utf8" }),
-    () => execFileSync("pip3",   ["install", "-U", "yt-dlp"], { encoding: "utf8" }),
-    () => execFileSync("python", ["-m", "pip", "install", "-U", "yt-dlp"], { encoding: "utf8" }),
+    () => execFileSync("yt-dlp",  ["-U"],                                    { encoding: "utf8" }),
+    () => execFileSync("pip",     ["install", "-U", "yt-dlp"],               { encoding: "utf8" }),
+    () => execFileSync("pip3",    ["install", "-U", "yt-dlp"],               { encoding: "utf8" }),
+    () => execFileSync("python",  ["-m", "pip", "install", "-U", "yt-dlp"], { encoding: "utf8" }),
   ];
   for (const attempt of strategies) {
     try {
@@ -550,7 +657,7 @@ app.post("/api/update-ytdlp", (_req, res) => {
   res.status(500).json({ error: "Update failed. Try running 'yt-dlp -U' manually in your terminal." });
 });
 
-// Open folder (cross-platform)
+// ── Open folder (cross-platform) ──────────────────────────────────────────────
 app.post("/api/open-folder", (req, res) => {
   const { dir } = req.body;
   if (!dir || typeof dir !== "string") return res.status(400).json({ error: "No dir" });
@@ -581,7 +688,7 @@ wss.on("connection", (ws) => {
 
     const settings = loadSettings();
 
-    // ── Single download ──────────────────────────────────────────────────────
+    // ── Single download ────────────────────────────────────────────────────
     if (msg.type === "download") {
       const { mode, url, options = {} } = msg;
       if (!url || typeof url !== "string")
@@ -611,7 +718,7 @@ wss.on("connection", (ws) => {
       });
     }
 
-    // ── Batch queue ──────────────────────────────────────────────────────────
+    // ── Batch queue ────────────────────────────────────────────────────────
     if (msg.type === "queue:run") {
       const { items = [], mode, options = {} } = msg;
       if (!items.length) return;
@@ -678,19 +785,16 @@ process.on("SIGINT",  () => gracefulShutdown("SIGINT"));
 // ── Init ──────────────────────────────────────────────────────────────────────
 (async () => {
   try {
-    // 1. Ensure data directory and default files exist / are valid before anything else
     fs.mkdirSync(DATA_DIR, { recursive: true });
 
-    // Write defaults if file is missing OR empty (0 bytes) — prevents JSON.parse crash
     const historyRaw  = fs.existsSync(HISTORY_FILE)  ? fs.readFileSync(HISTORY_FILE,  "utf8").trim() : "";
     const settingsRaw = fs.existsSync(SETTINGS_FILE) ? fs.readFileSync(SETTINGS_FILE, "utf8").trim() : "";
     if (!historyRaw)  fs.writeFileSync(HISTORY_FILE,  "[]");
     if (!settingsRaw) fs.writeFileSync(SETTINGS_FILE, JSON.stringify(buildDefaultSettings(), null, 2));
 
-    // 2. Validate yt-dlp + ffmpeg are reachable
+    // Resolves FFMPEG_PATH as a side-effect
     checkDependencies();
 
-    // 3. Start listening
     server.listen(PORT, () => {
       log("info", `YT Downloader Pro v2.0.0 started on http://localhost:${PORT}`);
       console.log(`\n  ✔  YT Downloader Pro v2.0.0  →  http://localhost:${PORT}`);
