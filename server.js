@@ -493,7 +493,132 @@ app.use("/media", (req, res) => {
   }
 });
 
-// ── GET /api/files ────────────────────────────────────────────────────────────
+// ── GET /api/stream-mkv — remux MKV → fragmented MP4 stream via ffmpeg ────────
+//
+// Seeking is implemented via ?start=<seconds> rather than HTTP byte-range.
+// Fragmented MP4 piped over chunked transfer has no content-length, so the
+// browser cannot map byte offsets to timestamps — Range requests would just
+// restart from byte 0 and confuse the player into resetting to the beginning.
+//
+// Instead the frontend intercepts seek events on MKV files and reloads the
+// stream URL with ?start=<targetSeconds>, which passes -ss to ffmpeg so it
+// fast-seeks to the correct keyframe on the server side before streaming.
+//
+// Query params:
+//   file   — filename (required)
+//   start  — seek offset in seconds, float (optional, default 0)
+//
+app.get("/api/stream-mkv", (req, res) => {
+  const fileName  = req.query.file;
+  const startSec  = Math.max(0, parseFloat(req.query.start) || 0);
+
+  if (!fileName || typeof fileName !== "string")
+    return res.status(400).json({ error: "Missing file param" });
+
+  const dir      = loadSettings().defaultDir;
+  const filePath = path.join(dir, path.normalize(fileName).replace(/^(\.\.(\/|\\|$))+/, ""));
+
+  // Path traversal guard
+  if (!filePath.startsWith(path.resolve(dir) + path.sep) &&
+       filePath !== path.resolve(dir))
+    return res.status(403).json({ error: "Forbidden" });
+
+  if (!fs.existsSync(filePath))
+    return res.status(404).json({ error: "File not found" });
+
+  log("info", `Streaming MKV: ${fileName} from ${startSec.toFixed(2)}s`);
+
+  res.setHeader("Content-Type",      "video/mp4");
+  res.setHeader("Transfer-Encoding", "chunked");
+  // No Accept-Ranges — we handle seeking via ?start= not byte ranges.
+  // Advertising Accept-Ranges would cause the browser to send Range requests
+  // which we can't satisfy correctly on a transcoded stream.
+
+  // Build ffmpeg args.
+  // -ss BEFORE -i is a fast input seek (decodes from nearest keyframe).
+  // -ss AFTER  -i is accurate but slow — it decodes and discards frames.
+  // For seeking in a player, fast input seek is what we want.
+  const ffmpegArgs = [];
+  if (startSec > 0) {
+    ffmpegArgs.push("-ss", String(startSec));   // fast input seek to keyframe
+  }
+  ffmpegArgs.push(
+    "-i",        filePath,
+    "-c:v",      "copy",      // copy video stream — zero CPU re-encode
+    "-c:a",      "aac",       // re-encode audio to AAC (browser-safe)
+    "-b:a",      "192k",
+    "-map",      "0:v:0",     // first video stream
+    "-map",      "0:a:0?",    // first audio stream (? = optional, won't fail if absent)
+    "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+    "-f",        "mp4",
+    "pipe:1",
+  );
+
+  const ffmpeg = spawn(FFMPEG_PATH, ffmpegArgs);
+
+  ffmpeg.stdout.pipe(res);
+
+  // IMPORTANT: always drain stderr — if the pipe buffer fills, ffmpeg stalls
+  ffmpeg.stderr.on("data", (chunk) => {
+    log("debug", "[ffmpeg-mkv]", { msg: chunk.toString().trimEnd() });
+  });
+
+  ffmpeg.on("error", (err) => {
+    log("error", "ffmpeg spawn failed", { err: err.message });
+    if (!res.headersSent) res.status(500).json({ error: "ffmpeg not found or crashed" });
+  });
+
+  ffmpeg.on("close", (code) => {
+    if (code !== 0) log("warn", `ffmpeg exited with code ${code} for ${fileName}`);
+    if (!res.writableEnded) res.end();
+  });
+
+  // Kill ffmpeg the moment the client disconnects or stops playback
+  req.on("close", () => {
+    try { ffmpeg.kill("SIGKILL"); } catch {}
+  });
+});
+
+// ── GET /api/mkv-duration — probe real duration via ffprobe ──────────────────
+// Fragmented MP4 streams report Infinity duration in the browser because there
+// is no content-length. This endpoint returns the true duration in seconds so
+// the frontend can render a working seek bar.
+app.get("/api/mkv-duration", (req, res) => {
+  const fileName = req.query.file;
+  if (!fileName || typeof fileName !== "string")
+    return res.status(400).json({ error: "Missing file param" });
+
+  const dir      = loadSettings().defaultDir;
+  const filePath = path.join(dir, path.normalize(fileName).replace(/^(\.\.(\/|\\|$))+/, ""));
+
+  if (!filePath.startsWith(path.resolve(dir) + path.sep) &&
+       filePath !== path.resolve(dir))
+    return res.status(403).json({ error: "Forbidden" });
+
+  if (!fs.existsSync(filePath))
+    return res.status(404).json({ error: "File not found" });
+
+  // ffprobe ships with ffmpeg — resolve it from the same directory as FFMPEG_PATH
+  const ffprobePath = path.join(path.dirname(FFMPEG_PATH),
+    process.platform === "win32" ? "ffprobe.exe" : "ffprobe");
+
+  try {
+    const out = execFileSync(ffprobePath, [
+      "-v",            "quiet",
+      "-print_format", "json",
+      "-show_entries", "format=duration",
+      filePath,
+    ], { encoding: "utf8", timeout: 10000 });
+    const data     = JSON.parse(out);
+    const duration = parseFloat(data?.format?.duration) || 0;
+    res.json({ duration });
+  } catch (err) {
+    log("warn", "ffprobe duration failed", { err: err.message });
+    res.json({ duration: 0 });   // non-fatal — seek bar just won't show total time
+  }
+});
+
+
 app.get("/api/files", (_req, res) => {
   const dir = loadSettings().defaultDir;
   try {
