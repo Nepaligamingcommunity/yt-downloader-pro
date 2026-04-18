@@ -2013,11 +2013,16 @@ function escHtml(s) {
 // ══════════════════════════════════════════════════════
 
 // State
-let playerFiles   = [];   // [{name,url,size,mtime,type}] from /api/files
-let playerIdx     = -1;   // index of currently loaded file
-let playerEl      = null; // active HTMLMediaElement (video or audio)
-let isSeeking     = false;
-let lastVolume    = 1;    // cached volume level so mute/unmute doesn't reset to 100%
+let playerFiles      = [];   // [{name,url,size,mtime,type}] from /api/files
+let playerIdx        = -1;   // index of currently loaded file
+let playerEl         = null; // active HTMLMediaElement (video or audio)
+let isSeeking        = false;
+let lastVolume       = 1;    // cached volume level so mute/unmute doesn't reset to 100%
+let mkvFile          = null;
+let mkvDuration      = 0;
+let mkvTimeOffset    = 0;
+let mkvSeekPending   = false;
+let mkvLastSeekAt    = 0;    // Date.now() of the last mkvSeekTo() call
 
 // Format seconds → m:ss or h:mm:ss
 function fmtTime(sec) {
@@ -2133,17 +2138,28 @@ function loadTrack(idx) {
     document.getElementById("playerControls").style.display = "flex";
     playerEl = aud;
     aud.play().catch(() => {});
+  } else if (ext === ".mkv") {
+    // ── MKV → remuxed to fragmented MP4 stream via backend ────────────────
+    // Seeking is done via ?start=<seconds> — NOT via byte-range requests.
+    // See mkvSeekTo() below.
+    mkvFile        = file.name;
+    mkvDuration    = 0;
+    mkvTimeOffset  = 0;
+    mkvSeekPending = false;
+    const vid = document.getElementById("playerVideo");
+    vid.src = `/api/stream-mkv?file=${encodeURIComponent(file.name)}`;
+    vid.style.display = "block";
+    document.getElementById("playerControls").style.display = "flex";
+    document.getElementById("fsBtn").style.display = "";
+    playerEl = vid;
+    vid.load();
+    vid.play().catch(() => {});
 
   } else {
-    // ── Unsupported (e.g. MKV) ────────────────────────
-    const msg = ext === ".mkv"
-      ? `.mkv files cannot be decoded by browsers natively.<br>
-         Re-download as <strong>MP4</strong> or open with VLC.<br><br>
-         <a href="${file.url}" download="${escHtml(file.name)}"
-            style="color:var(--blue)">⬇ Save to disk</a>`
-      : `<strong>${ext}</strong> is not supported for in-browser playback.`;
+    // ── Unsupported format ─────────────────────────────────────────────────
+    const msg = `<strong>${ext}</strong> is not supported for in-browser playback.`;
     document.getElementById("playerUnsupportedMsg").innerHTML = msg;
-    document.getElementById("playerUnsupported").style.display = "flex";
+    document.getElementById("playerUnsupported").style.display = "flex"; // was "block" — broke centering
   }
 }
 
@@ -2154,24 +2170,119 @@ function stopMedia() {
     el.removeAttribute("src");
     el.load();
   });
-  playerEl = null;
+  playerEl         = null;
+  mkvFile          = null;
+  mkvDuration      = 0;
+  mkvTimeOffset    = 0;
+  mkvSeekPending   = false;
+  mkvLastSeekAt    = 0;
   document.getElementById("ctrlPlay").textContent = "▶";
 }
 
 // ── Media element event handlers ───────────────────────
 function onMetaLoaded() {
   if (!playerEl) return;
-  document.getElementById("seekTotal").textContent = fmtTime(playerEl.duration);
+
+  // While a seek reload is in flight, mkvSeekPending is true.
+  // onMetaLoaded fires again for the new segment — we only want to
+  // restore play state here, NOT re-probe duration or reset the scrubber.
+  if (mkvSeekPending) {
+    mkvSeekPending = false;
+    // Restore volume/speed (already set by mkvSeekTo before calling load())
+    // — nothing extra needed. Just update the play button.
+    updatePlayBtn();
+    return;
+  }
+
+  if (mkvFile) {
+    // Only probe duration on the very first load (mkvDuration === 0).
+    // On subsequent segment loads triggered by seeking, mkvDuration is
+    // already populated so we skip the ffprobe call entirely.
+    if (mkvDuration === 0) {
+      fetch(`/api/mkv-duration?file=${encodeURIComponent(mkvFile)}`)
+        .then(r => r.json())
+        .then(d => {
+          if (d.duration > 0) {
+            mkvDuration = d.duration;
+            document.getElementById("seekTotal").textContent = fmtTime(d.duration);
+          }
+        })
+        .catch(() => {});
+    } else {
+      document.getElementById("seekTotal").textContent = fmtTime(mkvDuration);
+    }
+  } else {
+    document.getElementById("seekTotal").textContent = fmtTime(playerEl.duration);
+  }
+
   updatePlayBtn();
+}
+
+// ── MKV seek: reload stream from a target timestamp ────
+// We cannot use video.currentTime for MKV — the browser would send a
+// byte-range request which has no meaning on a transcoded pipe and just
+// resets to the start. Instead we reload the URL with ?start=<sec> so
+// ffmpeg begins the output from that keyframe on the server side.
+//
+// mkvTimeOffset records the ?start= value so that onTimeUpdate can add
+// it to video.currentTime (which always counts from 0 per segment) to
+// produce the correct wall-clock position for the seek bar and timestamp.
+function mkvSeekTo(targetSec) {
+  if (!mkvFile || !playerEl || mkvDuration <= 0) return;
+  targetSec = Math.max(0, Math.min(mkvDuration, targetSec));
+
+  const wasPlaying = !playerEl.paused;
+  const vol        = playerEl.volume;
+  const muted      = playerEl.muted;
+  const rate       = playerEl.playbackRate;
+
+  // Set the flag BEFORE calling load() so that onMetaLoaded (which fires
+  // during load()) knows this is a seek reload and skips re-probing duration.
+  mkvSeekPending  = true;
+  mkvTimeOffset   = targetSec;
+  mkvLastSeekAt   = Date.now();
+
+  playerEl.pause();
+  playerEl.volume       = vol;   // keep these set through the reload
+  playerEl.muted        = muted;
+  playerEl.playbackRate = rate;
+
+  playerEl.src = `/api/stream-mkv?file=${encodeURIComponent(mkvFile)}&start=${targetSec.toFixed(3)}`;
+  playerEl.load();
+
+  // Update the scrubber immediately so the thumb stays where the user
+  // dropped it instead of snapping back to 0 while the server responds.
+  const pct = (targetSec / mkvDuration) * 100;
+  setScrubber(pct, pct, 0);
+  document.getElementById("seekCurrent").textContent = fmtTime(targetSec);
+
+  // onMetaLoaded fires once the new segment headers arrive — at that point
+  // mkvSeekPending is cleared and we can start playing.
+  if (wasPlaying) {
+    // Use canplay rather than loadedmetadata for play, so the buffer has
+    // at least a few frames before we unpause.
+    playerEl.addEventListener("canplay", function onReady() {
+      playerEl.removeEventListener("canplay", onReady);
+      playerEl.play().catch(() => {});
+    }, { once: true });
+  }
 }
 
 function onTimeUpdate() {
   if (!playerEl || isSeeking) return;
-  const pct = playerEl.duration ? (playerEl.currentTime / playerEl.duration) * 100 : 0;
-  setScrubber(pct, pct, (playerEl.buffered.length
-    ? (playerEl.buffered.end(playerEl.buffered.length-1) / playerEl.duration) * 100
-    : 0));
-  document.getElementById("seekCurrent").textContent = fmtTime(playerEl.currentTime);
+  // After an MKV seek, the browser's currentTime counts from 0 again because
+  // each ?start= request is a new stream. mkvTimeOffset holds the ?start=
+  // value so we can reconstruct the real wall-clock position.
+  const wallTime = mkvFile ? (mkvTimeOffset + playerEl.currentTime) : playerEl.currentTime;
+  const duration = (mkvFile && mkvDuration > 0) ? mkvDuration : playerEl.duration;
+  const pct      = duration ? (wallTime / duration) * 100 : 0;
+  const bufEnd   = playerEl.buffered.length
+    ? playerEl.buffered.end(playerEl.buffered.length - 1)
+    : 0;
+  // buf pct is also relative to the segment, so offset it too
+  const bufPct = duration ? ((mkvTimeOffset + bufEnd) / duration) * 100 : 0;
+  setScrubber(pct, pct, bufPct);
+  document.getElementById("seekCurrent").textContent = fmtTime(wallTime);
 }
 
 function onProgress() {
@@ -2184,6 +2295,13 @@ function onProgress() {
 }
 
 function onEnded() {
+  // When mkvSeekTo() reloads the stream, two "ended" events can arrive:
+  //  1. Immediately when load() aborts the old segment (mkvSeekPending is true)
+  //  2. ~4-5 s later when the server finishes draining the previous ffmpeg pipe
+  //     (mkvSeekPending has already been cleared by then)
+  // Guard both cases with a 10-second grace window from the last seek.
+  if (mkvSeekPending) return;
+  if (mkvFile && mkvLastSeekAt > 0 && (Date.now() - mkvLastSeekAt) < 10000) return;
   updatePlayBtn();
   playAdjacent(1);
 }
@@ -2210,7 +2328,13 @@ function togglePlay() {
 
 function skip(sec) {
   if (!playerEl) return;
-  playerEl.currentTime = Math.max(0, Math.min(playerEl.duration || 0, playerEl.currentTime + sec));
+  if (mkvFile) {
+    // currentTime is segment-relative, add offset for wall-clock position
+    const wallTime = mkvTimeOffset + playerEl.currentTime;
+    mkvSeekTo(Math.max(0, Math.min(mkvDuration || Infinity, wallTime + sec)));
+  } else {
+    playerEl.currentTime = Math.max(0, Math.min(playerEl.duration || 0, playerEl.currentTime + sec));
+  }
 }
 
 function playAdjacent(delta) {
@@ -2278,16 +2402,25 @@ function toggleFullscreen() {
 
 // ── Seek bar drag (mouse + touch) ──────────────────────
 function seekStart(e) {
-  if (!playerEl || !playerEl.duration) return;
+  if (!playerEl) return;
+  const duration = (mkvFile && mkvDuration > 0) ? mkvDuration : playerEl.duration;
+  if (!duration) return;
   isSeeking = true;
-  seekMove(e);
-  const onMove = ev => seekMove(ev);
-  const onUp   = ()  => {
+  let lastRatio = 0;  // track ratio in closure so onUp can use it reliably
+  seekMove(e, r => { lastRatio = r; });
+
+  const onMove = ev => seekMove(ev, r => { lastRatio = r; });
+  const onUp   = () => {
     isSeeking = false;
     document.removeEventListener("mousemove", onMove);
     document.removeEventListener("mouseup",   onUp);
     document.removeEventListener("touchmove", onMove);
     document.removeEventListener("touchend",  onUp);
+
+    if (mkvFile) {
+      if (mkvDuration > 0) mkvSeekTo(lastRatio * mkvDuration);
+    }
+    // For regular video, currentTime was already set live in seekMove
   };
   document.addEventListener("mousemove", onMove);
   document.addEventListener("mouseup",   onUp);
@@ -2295,18 +2428,32 @@ function seekStart(e) {
   document.addEventListener("touchend",  onUp);
 }
 
-function seekMove(e) {
-  if (!playerEl || !playerEl.duration) return;
-  const wrap = document.getElementById("seekWrap");
-  const rect = wrap.getBoundingClientRect();
+function seekMove(e, ratioCallback) {
+  if (!playerEl) return;
+  const duration = (mkvFile && mkvDuration > 0) ? mkvDuration : playerEl.duration;
+  if (!duration) return;
+  const wrap    = document.getElementById("seekWrap");
+  const rect    = wrap.getBoundingClientRect();
   const clientX = e.touches ? e.touches[0].clientX : e.clientX;
   const ratio   = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-  playerEl.currentTime = ratio * playerEl.duration;
-  setScrubber(ratio * 100, ratio * 100,
-    playerEl.buffered.length
-      ? (playerEl.buffered.end(playerEl.buffered.length-1) / playerEl.duration) * 100
-      : 0);
-  document.getElementById("seekCurrent").textContent = fmtTime(playerEl.currentTime);
+
+  if (ratioCallback) ratioCallback(ratio);
+
+  // For MKV: only move the scrubber UI while dragging — do NOT touch
+  // currentTime (triggers a byte-range request which resets to start).
+  // The actual seek fires on mouseUp/touchEnd in seekStart.
+  if (!mkvFile) {
+    playerEl.currentTime = ratio * duration;
+  }
+
+  const bufEnd = playerEl.buffered.length
+    ? playerEl.buffered.end(playerEl.buffered.length - 1) : 0;
+  const bufPct = mkvFile
+    ? ((mkvTimeOffset + bufEnd) / duration) * 100
+    : (bufEnd / duration) * 100;
+
+  setScrubber(ratio * 100, ratio * 100, bufPct);
+  document.getElementById("seekCurrent").textContent = fmtTime(ratio * duration);
 }
 
 // Space = play/pause when player tab is active
@@ -2337,11 +2484,19 @@ document.addEventListener("keydown", e => {
   // Left/Right Arrows (No Ctrl) = 5 Second Seek
   if (e.code === "ArrowRight" && !e.ctrlKey) {
     e.preventDefault();
-    playerEl.currentTime = Math.min(playerEl.duration, playerEl.currentTime + 5);
+    if (mkvFile) {
+      mkvSeekTo(Math.min(mkvDuration || Infinity, mkvTimeOffset + playerEl.currentTime + 5));
+    } else {
+      playerEl.currentTime = Math.min(playerEl.duration, playerEl.currentTime + 5);
+    }
   }
   if (e.code === "ArrowLeft" && !e.ctrlKey) {
     e.preventDefault();
-    playerEl.currentTime = Math.max(0, playerEl.currentTime - 5);
+    if (mkvFile) {
+      mkvSeekTo(Math.max(0, mkvTimeOffset + playerEl.currentTime - 5));
+    } else {
+      playerEl.currentTime = Math.max(0, playerEl.currentTime - 5);
+    }
   }
 
   // Ctrl + Right = Play Media Below (Next)
