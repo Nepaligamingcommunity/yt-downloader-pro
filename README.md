@@ -117,6 +117,17 @@ Edit manually if needed:
 
 ---
 
+## 🍪 Setup cookies.txt
+
+1. **Install Extension:** Download [Get cookies.txt LOCALLY](https://chromewebstore.google.com/search/Get%20cookies.txt%20LOCALLY) from the Chrome Web Store.
+2. **Export:** Click the extension icon in your browser bar and select **Export**.
+3. **Configure:**
+    * Locate the downloaded file in your `Downloads` folder.
+    * Rename the file to `cookies.txt`.
+    * Move it to the `/.ytdlp-web/` directory inside your project folder.
+
+---
+
 ## 📡 API Reference
 
 ### REST Endpoints
